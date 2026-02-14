@@ -11,6 +11,8 @@ export interface TreeState {
   position: number[];
   dirty: boolean;
   report: ReportState;
+  /** Monotonic counter incremented only when tree topology changes (new/deleted nodes). */
+  treeStructureVersion: number;
 }
 
 export interface TreeNode {
@@ -146,6 +148,7 @@ export function defaultTree(fen?: string, turn?: "white" | "black"): TreeState {
   return {
     dirty: false,
     position: [],
+    treeStructureVersion: 0,
     root: {
       fen: fen?.trim() ?? INITIAL_FEN,
       move: null,

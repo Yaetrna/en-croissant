@@ -131,6 +131,7 @@ const getNewState = () => {
     report: {
       inProgress: false,
     },
+    treeStructureVersion: s.treeStructureVersion,
   };
 };
 
@@ -187,6 +188,7 @@ test("should handle makeMove", () => {
     ...defaultTree(),
     dirty: true,
     position: [0],
+    treeStructureVersion: 1,
     root: {
       ...defaultTree().root,
       children: [
@@ -215,6 +217,7 @@ test("should handle makeMoves", () => {
     ...treeE4D5(),
     dirty: true,
     position: [0, 0],
+    treeStructureVersion: 1,
   });
 });
 
@@ -292,7 +295,7 @@ test("should handle deleteMove", () => {
   store.setState(treeE4D5());
   store.getState().deleteMove([0]);
 
-  expect(getNewState()).toStrictEqual({ ...defaultTree(), dirty: true });
+  expect(getNewState()).toStrictEqual({ ...defaultTree(), dirty: true, treeStructureVersion: 1 });
 });
 
 test("should handle setAnnotation", () => {
@@ -344,6 +347,7 @@ test("should handle setFen", () => {
   expect(getNewState()).toStrictEqual({
     ...defaultTree(),
     dirty: true,
+    treeStructureVersion: 1,
     root: {
       ...defaultTree().root,
       fen: "rnbq1bnr/ppppkppp/8/4p3/4P3/8/PPPPKPPP/RNBQ1BNR w - - 2 3",
@@ -499,6 +503,7 @@ test("should handle promoteVariation", () => {
     ...treeE4D5Nf3(),
     dirty: true,
     position: [0],
+    treeStructureVersion: 1,
     root: {
       ...treeE4D5Nf3().root,
       children: [

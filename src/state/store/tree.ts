@@ -117,6 +117,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
         dirty: true,
         root: defaultTree(fen).root,
         position: [],
+        treeStructureVersion: state.treeStructureVersion + 1,
       })),
 
     goToNext: () =>
@@ -208,6 +209,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           headers: { ...state.headers },
           dirty: state.dirty,
           report: state.report,
+          treeStructureVersion: state.treeStructureVersion,
         };
         makeMoveOnTree({
           state: mutableState,
@@ -224,6 +226,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           position: mutableState.position,
           headers: mutableState.headers,
           dirty: mutableState.dirty,
+          treeStructureVersion: state.treeStructureVersion + 1,
         };
       });
     },
@@ -244,6 +247,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           headers: { ...state.headers },
           dirty: state.dirty,
           report: state.report,
+          treeStructureVersion: state.treeStructureVersion,
         };
         makeMoveOnTree({ state: mutableState, move: payload, last: true, clock });
         return {
@@ -252,6 +256,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           position: mutableState.position,
           headers: mutableState.headers,
           dirty: mutableState.dirty,
+          treeStructureVersion: state.treeStructureVersion + 1,
         };
       }),
 
@@ -293,6 +298,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           headers: { ...state.headers },
           dirty: true,
           report: state.report,
+          treeStructureVersion: state.treeStructureVersion,
         };
         for (let i = fastIdx; i < payload.length; i++) {
           const m = parseSanOrUci(pos, payload[i]);
@@ -313,6 +319,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           position: mutableState.position,
           headers: mutableState.headers,
           dirty: mutableState.dirty,
+          treeStructureVersion: state.treeStructureVersion + 1,
         };
       }),
     goToEnd: () =>
@@ -451,6 +458,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       set(
         produce((state) => {
           state.dirty = true;
+          state.treeStructureVersion++;
           deleteMove(state, path ?? state.position);
         }),
       ),
@@ -458,6 +466,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       set(
         produce((state) => {
           state.dirty = true;
+          state.treeStructureVersion++;
           promoteVariation(state, path);
         }),
       ),
@@ -465,6 +474,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       set(
         produce((state) => {
           state.dirty = true;
+          state.treeStructureVersion++;
           let p = path;
           while (p.some((v) => v !== 0)) {
             promoteVariation(state, p);
@@ -526,6 +536,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
             headers,
             root: defaultTree(headers.fen).root,
             position: [],
+            treeStructureVersion: state.treeStructureVersion + 1,
           };
         }
         return { ...state, dirty: true, headers };
@@ -587,6 +598,7 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
           headers: state.headers,
           dirty: state.dirty,
           report: state.report,
+          treeStructureVersion: state.treeStructureVersion,
         }) as TreeStoreState,
       }),
     );

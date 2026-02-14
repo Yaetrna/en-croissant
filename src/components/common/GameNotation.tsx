@@ -53,11 +53,15 @@ function GameNotation({
   const headers = useStore(store, (s) => s.headers);
   const root = useStore(store, (s) => s.root);
   const rootComment = root.comment;
+  const treeStructureVersion = useStore(store, (s) => s.treeStructureVersion);
 
-  // Build transposition index O(N) once per root change, shared via context
+  // Build transposition index O(N) once per structural change, shared via context
+  // Uses version counter instead of root reference so annotation-only changes
+  // (shapes, comments, scores) don't trigger a rebuild.
   const transpositionIndex = useMemo(() => {
+    const currentRoot = store.getState().root;
     const index = new Map<string, number[][]>();
-    for (const item of treeIterator(root)) {
+    for (const item of treeIterator(currentRoot)) {
       const stripped = stripClock(item.node.fen);
       let arr = index.get(stripped);
       if (!arr) {
@@ -67,7 +71,7 @@ function GameNotation({
       arr.push(item.position);
     }
     return index;
-  }, [root]);
+  }, [treeStructureVersion, store]);
 
   const viewport = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLSpanElement>(null);
