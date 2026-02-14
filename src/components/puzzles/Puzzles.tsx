@@ -5,7 +5,7 @@ import {
   currentPuzzleTimerAtom,
   hidePuzzleRatingAtom,
   jumpToNextPuzzleAtom,
-  progressivePuzzlesAtom,
+  puzzleModeAtom,
   puzzleRatingRangeAtom,
   puzzleThemeAtom,
   selectedPuzzleDbAtom,
@@ -156,11 +156,27 @@ function Puzzles({ id }: { id: string }) {
     solutionAbortRef.current?.abort();
 
     let range = ratingRange;
-    if (progressive) {
+    if (puzzleMode === "progressive") {
       const rating = puzzles[currentPuzzle]?.rating;
       if (rating) {
         range = [rating + 50, rating + 100];
         setRatingRange([rating + 50, rating + 100]);
+      }
+    } else if (puzzleMode === "adaptive") {
+      const lastPuzzle = puzzles[puzzles.length - 1];
+      if (lastPuzzle) {
+        const baseRating = lastPuzzle.rating;
+        if (lastPuzzle.completion === "correct") {
+          // Solved: increase difficulty
+          range = [baseRating + 50, baseRating + 150];
+        } else if (lastPuzzle.completion === "incorrect") {
+          // Failed: decrease difficulty
+          range = [Math.max(600, baseRating - 150), Math.max(600, baseRating - 50)];
+        } else {
+          // Still incomplete: keep same range
+          range = [Math.max(600, baseRating - 50), baseRating + 50];
+        }
+        setRatingRange(range);
       }
     }
     commands
@@ -206,7 +222,7 @@ function Puzzles({ id }: { id: string }) {
   const [addOpened, setAddOpened] = useState(false);
   const [deleteModalOpened, setDeleteModalOpened] = useState(false);
 
-  const [progressive, setProgressive] = useAtom(progressivePuzzlesAtom);
+  const [puzzleMode, setPuzzleMode] = useAtom(puzzleModeAtom);
   const [hideRating, setHideRating] = useAtom(hidePuzzleRatingAtom);
 
   const [timerStart, setTimerStart] = useAtom(currentPuzzleTimerAtom);
@@ -367,7 +383,7 @@ function Puzzles({ id }: { id: string }) {
                       max={2800}
                       value={ratingRange}
                       onChange={setRatingRange}
-                      disabled={progressive}
+                      disabled={puzzleMode !== "normal"}
                       marks={[
                         { value: 600, label: "600" },
                         { value: 1700, label: "1700" },
@@ -388,13 +404,19 @@ function Puzzles({ id }: { id: string }) {
                     searchable
                   />
                   <SimpleGrid cols={2} spacing="sm">
-                    <Switch
-                      label={t("Puzzle.Progressive")}
-                      description={t("Puzzle.Progressive.Desc")}
-                      checked={progressive}
-                      onChange={(event) =>
-                        setProgressive(event.currentTarget.checked)
-                      }
+                    <Select
+                      label={t("Puzzle.Mode")}
+                      description={t("Puzzle.Mode.Desc")}
+                      data={[
+                        { label: t("Puzzle.Mode.Normal"), value: "normal" },
+                        { label: t("Puzzle.Mode.Progressive"), value: "progressive" },
+                        { label: t("Puzzle.Mode.Adaptive"), value: "adaptive" },
+                      ]}
+                      value={puzzleMode}
+                      onChange={(v) => {
+                        if (v) setPuzzleMode(v as "normal" | "progressive" | "adaptive");
+                      }}
+                      clearable={false}
                     />
                     <Switch
                       label={t("Puzzle.HideRating")}

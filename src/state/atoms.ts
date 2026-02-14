@@ -298,9 +298,10 @@ export const hidePuzzleRatingAtom = atomWithStorage<boolean>(
   "hide-puzzle-rating",
   false,
 );
-export const progressivePuzzlesAtom = atomWithStorage<boolean>(
-  "progressive-puzzles",
-  false,
+export type PuzzleMode = "normal" | "progressive" | "adaptive";
+export const puzzleModeAtom = atomWithStorage<PuzzleMode>(
+  "puzzle-mode",
+  "normal",
 );
 export const jumpToNextPuzzleAtom = atomWithStorage<boolean>(
   "puzzle-jump-immediately",
