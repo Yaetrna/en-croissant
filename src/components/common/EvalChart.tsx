@@ -161,11 +161,11 @@ function EvalChart(props: EvalChartProps) {
     }
   };
 
-  const data = [...getData()];
+  const data = useMemo(() => [...getData()], [root]);
   const currentPositionName = data.find((point) =>
     equal(point.movePath, position),
   )?.name;
-  const colouroffset = gradientOffset(data);
+  const colouroffset = useMemo(() => gradientOffset(data), [data]);
 
   const [chartType, setChartType] = useAtom(reportTypeAtom);
 

@@ -62,9 +62,9 @@ function AnalysisPanel() {
     useShallow((s) => s.currentNode().fen),
   );
   const is960 = useMemo(() => headers.variant === "Chess960", [headers]);
-  const moves = useStore(
-    store,
-    useShallow((s) => getVariationLine(s.root, s.position, is960)),
+  const moves = useMemo(
+    () => getVariationLine(store.getState().root, store.getState().position, is960),
+    [store, rootFen, is960, currentNodeFen],
   );
   const currentNodeHalfMoves = useStore(
     store,

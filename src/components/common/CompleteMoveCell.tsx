@@ -2,7 +2,6 @@ import { Comment } from "@/components/common/Comment";
 import { currentTabAtom } from "@/state/atoms";
 import type { Annotation } from "@/utils/annotation";
 import { hasMorePriority, stripClock } from "@/utils/chess";
-import { type TreeNode, treeIterator } from "@/utils/treeReducer";
 import { ActionIcon, Box, Menu, Portal, Text, Tooltip } from "@mantine/core";
 import { useClickOutside } from "@mantine/hooks";
 import {
@@ -15,28 +14,12 @@ import {
 } from "@tabler/icons-react";
 import equal from "fast-deep-equal";
 import { useAtomValue } from "jotai";
-import { memo, useContext, useState } from "react";
+import { memo, useContext, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
-import { useStoreWithEqualityFn } from "zustand/traditional";
 import MoveCell from "./MoveCell";
+import { TranspositionContext } from "./TranspositionContext";
 import { TreeStateContext } from "./TreeStateContext";
-
-function getTranspositions(fen: string, position: number[], root: TreeNode) {
-  if (position.length === 0 || position.every((v) => v === 0)) return [];
-  const transpositions: number[][] = [];
-  const strippedFen = stripClock(fen);
-  const iterator = treeIterator(root);
-  for (const item of iterator) {
-    if (hasMorePriority(position, item.position)) {
-      continue;
-    }
-    if (stripClock(item.node.fen) === strippedFen) {
-      transpositions.push(item.position);
-    }
-  }
-  return transpositions;
-}
 
 function CompleteMoveCell({
   movePath,
@@ -69,11 +52,17 @@ function CompleteMoveCell({
   const isCurrentVariation = useStore(store, (s) =>
     equal(s.position, movePath),
   );
-  const transpositions = useStoreWithEqualityFn(
-    store,
-    (s) => (fen ? getTranspositions(fen, movePath, s.root) : []),
-    (a, b) => equal(a, b),
-  );
+
+  // O(1) transposition lookup from pre-built index
+  const transpositionIndex = useContext(TranspositionContext);
+  const transpositions = useMemo(() => {
+    if (!fen || movePath.length === 0 || movePath.every((v) => v === 0))
+      return [];
+    const candidates = transpositionIndex.get(stripClock(fen));
+    if (!candidates) return [];
+    return candidates.filter((p) => !hasMorePriority(movePath, p));
+  }, [fen, movePath, transpositionIndex]);
+
   const goToMove = useStore(store, (s) => s.goToMove);
   const deleteMove = useStore(store, (s) => s.deleteMove);
   const promoteVariation = useStore(store, (s) => s.promoteVariation);

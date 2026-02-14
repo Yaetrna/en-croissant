@@ -33,34 +33,99 @@ export type ListNode = {
 };
 
 export function* treeIterator(node: TreeNode): Generator<ListNode> {
-  const stack: ListNode[] = [{ position: [], node }];
-  while (stack.length > 0) {
-    const { position, node } = stack.pop()!;
-    yield { position, node };
-    for (let i = node.children.length - 1; i >= 0; i--) {
-      stack.push({ position: [...position, i], node: node.children[i] });
+  // Use a mutable path array and only copy on yield to avoid O(N*D) allocations
+  const path: number[] = [];
+  const stack: { node: TreeNode; childIndex: number; depth: number }[] = [];
+  let current: TreeNode | null = node;
+  let depth = 0;
+
+  while (current !== null || stack.length > 0) {
+    if (current !== null) {
+      // Truncate path to current depth and yield
+      path.length = depth;
+      yield { position: path.slice(), node: current };
+
+      if (current.children.length > 0) {
+        // Push siblings (starting from last) onto stack for later
+        for (let i = current.children.length - 1; i > 0; i--) {
+          stack.push({ node: current.children[i], childIndex: i, depth: depth + 1 });
+        }
+        // Continue down the first child (main line)
+        path.push(0);
+        current = current.children[0];
+        depth++;
+      } else {
+        current = null;
+      }
+    } else {
+      const frame = stack.pop()!;
+      depth = frame.depth;
+      path.length = depth - 1;
+      path.push(frame.childIndex);
+      current = frame.node;
     }
   }
 }
 
+/**
+ * Build a Map from FEN to position path for O(1) lookups.
+ * Only stores the first occurrence of each FEN.
+ */
+export function buildFenIndex(node: TreeNode): Map<string, number[]> {
+  const index = new Map<string, number[]>();
+  for (const { position, node: n } of treeIterator(node)) {
+    if (!index.has(n.fen)) {
+      index.set(n.fen, position);
+    }
+  }
+  return index;
+}
+
 export function findFen(fen: string, node: TreeNode): number[] {
-  const iterator = treeIterator(node);
-  for (const item of iterator) {
-    if (item.node.fen === fen) {
-      return item.position;
+  // DFS search without materializing positions until match found
+  const stack: { node: TreeNode; depth: number; childIndex: number }[] = [];
+  const path: number[] = [];
+  let current: TreeNode | null = node;
+  let depth = 0;
+
+  while (current !== null || stack.length > 0) {
+    if (current !== null) {
+      path.length = depth;
+      if (current.fen === fen) {
+        return path.slice();
+      }
+      if (current.children.length > 0) {
+        for (let i = current.children.length - 1; i > 0; i--) {
+          stack.push({ node: current.children[i], childIndex: i, depth: depth + 1 });
+        }
+        path.push(0);
+        current = current.children[0];
+        depth++;
+      } else {
+        current = null;
+      }
+    } else {
+      const frame = stack.pop()!;
+      depth = frame.depth;
+      path.length = depth - 1;
+      path.push(frame.childIndex);
+      current = frame.node;
     }
   }
   return [];
 }
 
 export function* treeIteratorMainLine(node: TreeNode): Generator<ListNode> {
-  let current: ListNode | undefined = { position: [], node };
-  while (current?.node) {
-    yield current;
-    current = {
-      position: [...current.position, 0],
-      node: current.node.children[0],
-    };
+  const path: number[] = [];
+  let current: TreeNode | undefined = node;
+  let first = true;
+  while (current) {
+    if (!first) {
+      path.push(0);
+    }
+    first = false;
+    yield { position: path.slice(), node: current };
+    current = current.children[0];
   }
 }
 
@@ -74,8 +139,9 @@ export function countMainPly(node: TreeNode): number {
   return count;
 }
 
-export function defaultTree(fen?: string): TreeState {
-  const [pos] = positionFromFen(fen ?? INITIAL_FEN);
+export function defaultTree(fen?: string, turn?: "white" | "black"): TreeState {
+  // Allow passing turn directly to avoid redundant positionFromFen() call
+  const resolvedTurn = turn ?? positionFromFen(fen ?? INITIAL_FEN)[0]?.turn ?? "white";
 
   return {
     dirty: false,
@@ -87,7 +153,7 @@ export function defaultTree(fen?: string): TreeState {
       children: [],
       score: null,
       depth: null,
-      halfMoves: pos?.turn === "black" ? 1 : 0,
+      halfMoves: resolvedTurn === "black" ? 1 : 0,
       shapes: [],
       annotations: [],
       comment: "",

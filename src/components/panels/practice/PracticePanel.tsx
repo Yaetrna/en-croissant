@@ -13,7 +13,7 @@ import {
   currentTabAtom,
   deckAtomFamily,
 } from "@/state/atoms";
-import { findFen, getNodeAtPath } from "@/utils/treeReducer";
+import { buildFenIndex, findFen, getNodeAtPath } from "@/utils/treeReducer";
 import {
   ActionIcon,
   Badge,
@@ -32,7 +32,7 @@ import { useToggle } from "@mantine/hooks";
 import { IconArrowRight } from "@tabler/icons-react";
 import dayjs from "dayjs";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
-import { useContext, useEffect } from "react";
+import { useContext, useEffect, useMemo } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useTranslation } from "react-i18next";
 import { formatDate } from "ts-fsrs";
@@ -60,15 +60,16 @@ function PracticePanel() {
   );
 
   useEffect(() => {
+    if (deck.positions.length > 0) return;
     const newDeck = buildFromTree(
       root,
       headers.orientation || "white",
       headers.start || [],
     );
-    if (newDeck.length > 0 && deck.positions.length === 0) {
+    if (newDeck.length > 0) {
       setDeck({ positions: newDeck, logs: [] });
     }
-  }, [deck, root, headers, setDeck]);
+  }, [deck.positions.length, root, headers, setDeck]);
 
   const stats = getStats(deck.positions);
 
@@ -86,7 +87,7 @@ function PracticePanel() {
     if (deck.logs[deck.logs.length - 1]?.rating === 4) {
       newPractice();
     }
-  }, [JSON.stringify(deck)]);
+  }, [deck.logs.length]);
 
   const [positionsOpen, setPositionsOpen] = useToggle();
   const [logsOpen, setLogsOpen] = useToggle();
@@ -283,6 +284,8 @@ function PositionsModal({
   const store = useContext(TreeStateContext)!;
   const root = useStore(store, (s) => s.root);
   const goToMove = useStore(store, (s) => s.goToMove);
+  // Build FEN index once for O(1) lookups instead of O(N) findFen per card
+  const fenIndex = useMemo(() => buildFenIndex(root), [root]);
   return (
     <Modal
       opened={open}
@@ -295,7 +298,7 @@ function PositionsModal({
       )}
       <SimpleGrid cols={2}>
         {deck.positions.map((c) => {
-          const position = findFen(c.fen, root);
+          const position = fenIndex.get(c.fen) ?? [];
           const node = getNodeAtPath(root, position);
           return (
             <Card key={c.fen}>
@@ -363,6 +366,8 @@ function LogsModal({
   const store = useContext(TreeStateContext)!;
   const root = useStore(store, (s) => s.root);
   const goToMove = useStore(store, (s) => s.goToMove);
+  // Build FEN index once for O(1) lookups instead of O(N) findFen per log
+  const fenIndex = useMemo(() => buildFenIndex(root), [root]);
   return (
     <Modal
       opened={open}
@@ -373,7 +378,7 @@ function LogsModal({
       <SimpleGrid cols={2}>
         {logs.length === 0 && <Text>{t("Board.Practice.NoLogsYet")}</Text>}
         {logs.map((log) => {
-          const position = findFen(log.fen, root);
+          const position = fenIndex.get(log.fen) ?? [];
           const node = getNodeAtPath(root, position);
 
           return (

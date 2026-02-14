@@ -8,7 +8,7 @@ import {
   makeUci,
   parseUci,
 } from "chessops";
-import { type Chess, castlingSide, normalizeMove } from "chessops/chess";
+import { Chess, castlingSide, normalizeMove } from "chessops/chess";
 import { INITIAL_FEN, makeFen, parseFen } from "chessops/fen";
 import { isPawns, parseComment } from "chessops/pgn";
 import { makeSan, parseSan } from "chessops/san";
@@ -259,71 +259,86 @@ export function getPGN(
   if (path && path.length === 0) {
     return "";
   }
-  let pgn = "";
+  // Use array-based building to avoid O(N²) string concatenation
+  const parts: string[] = [];
   if (headers) {
-    pgn += headersToPGN(headers);
+    parts.push(headersToPGN(headers));
   }
   if (root && tree.fen !== INITIAL_FEN) {
-    pgn += '[SetUp "1"]\n';
-    pgn += `[FEN "${tree.fen}"]\n`;
+    parts.push('[SetUp "1"]\n');
+    parts.push(`[FEN "${tree.fen}"]\n`);
   }
-  pgn += "\n";
-  if (root && tree.comment !== null) {
-    pgn += `${getMoveText(tree, {
-      glyphs,
-      comments,
-      extraMarkups,
-    })}`;
-  }
-  const variationsPGN = variations
-    ? tree.children.slice(1).map(
-        (variation) =>
-          `${getMoveText(variation, {
-            glyphs,
-            comments,
-            extraMarkups,
-            isFirst: true,
-          })} ${getPGN(variation, {
-            headers: null,
-            glyphs,
-            comments,
-            variations,
-            extraMarkups,
-            root: false,
-            path: null,
-          })}`,
-      )
-    : [];
-  if (tree.children.length > 0) {
-    const child = tree.children[path ? path[0] : 0];
-    pgn += getMoveText(child, {
-      glyphs: glyphs,
-      comments,
-      extraMarkups,
-      isFirst: root,
-    });
-  }
-  if (!path) {
-    for (const variation of variationsPGN) {
-      pgn += ` (${variation}) `;
+  parts.push("\n");
+
+  // Iterative serialization using an explicit stack to avoid deep recursion
+  const stack: { node: TreeNode; isRoot: boolean; path: number[] | null }[] = [
+    { node: tree, isRoot: root, path },
+  ];
+
+  while (stack.length > 0) {
+    const { node: current, isRoot, path: currentPath } = stack.pop()!;
+
+    if (currentPath && currentPath.length === 0) {
+      continue;
+    }
+
+    if (isRoot && current.comment !== null) {
+      parts.push(getMoveText(current, { glyphs, comments, extraMarkups }));
+    }
+
+    if (current.children.length > 0) {
+      const childIdx = currentPath ? currentPath[0] : 0;
+      const child = current.children[childIdx];
+      parts.push(
+        getMoveText(child, {
+          glyphs,
+          comments,
+          extraMarkups,
+          isFirst: isRoot,
+        }),
+      );
+
+      if (!currentPath && variations) {
+        for (let vi = 1; vi < current.children.length; vi++) {
+          const variation = current.children[vi];
+          parts.push(" (");
+          parts.push(
+            getMoveText(variation, {
+              glyphs,
+              comments,
+              extraMarkups,
+              isFirst: true,
+            }),
+          );
+          parts.push(" ");
+          parts.push(
+            getPGN(variation, {
+              headers: null,
+              glyphs,
+              comments,
+              variations,
+              extraMarkups,
+              root: false,
+              path: null,
+            }),
+          );
+          parts.push(") ");
+        }
+      }
+
+      // Continue with the main line child (push to stack for iterative traversal)
+      stack.push({
+        node: child,
+        isRoot: false,
+        path: currentPath ? currentPath.slice(1) : null,
+      });
     }
   }
 
-  if (tree.children.length > 0) {
-    pgn += getPGN(tree.children[path ? path[0] : 0], {
-      headers: null,
-      glyphs,
-      comments,
-      variations,
-      extraMarkups,
-      root: false,
-      path: path ? path.slice(1) : null,
-    });
-  }
   if (root && headers) {
-    pgn += ` ${headers.result}`;
+    parts.push(` ${headers.result}`);
   }
-  return pgn.trim();
+  return parts.join("").trim();
 }
 
 export function parseKeyboardMove(san: string, fen: string) {
@@ -376,18 +391,42 @@ function innerParsePGN(
   tokens: Token[],
   fen: string = INITIAL_FEN,
   halfMoves = 0,
-): TreeState {
-  const tree = defaultTree(fen);
+  startIndex = 0,
+  endIndex?: number,
+  initialPos?: Chess,
+): { tree: TreeState; endPos: number } {
+  const end = endIndex ?? tokens.length;
+
+  // Maintain a running Chess position to avoid re-parsing FEN on every move.
+  // This is the single biggest performance win: eliminates positionFromFen() per move.
+  let pos: Chess;
+  if (initialPos) {
+    pos = initialPos.clone();
+  } else {
+    const setup = parseFen(fen).unwrap();
+    const result = Chess.fromSetup(setup);
+    if (result.isErr) {
+      return { tree: defaultTree(fen), endPos: end };
+    }
+    pos = result.unwrap();
+  }
+
+  // Pass turn directly to defaultTree to avoid another positionFromFen() call
+  const tree = defaultTree(fen, pos.turn);
   let root = tree.root;
   let prevNode = root;
   root.halfMoves = halfMoves;
-  const setup = parseFen(fen).unwrap();
 
-  if (halfMoves === 0 && setup.turn === "black") {
+  if (halfMoves === 0 && pos.turn === "black") {
     root.halfMoves += 1;
   }
 
-  for (let i = 0; i < tokens.length; i++) {
+  // Keep a reference to the position before the current move,
+  // so variations can branch from it.
+  let prevPos: Chess = pos.clone();
+
+  let i = startIndex;
+  while (i < end) {
     const token = tokens[i];
 
     if (token.type === "Comment") {
@@ -427,49 +466,57 @@ function innerParsePGN(
       }
 
       root.comment = comment.text;
-    } else if (token.type === "ParenOpen") {
-      const variation = [];
-      let subvariations = 0;
       i++;
-      while (
-        i < tokens.length &&
-        (subvariations > 0 || tokens[i].type !== "ParenClose")
-      ) {
+    } else if (token.type === "ParenOpen") {
+      // Skip the ParenOpen and find the matching ParenClose using index-based scanning
+      i++;
+      const varStart = i;
+      let subvariations = 0;
+      while (i < end) {
         if (tokens[i].type === "ParenOpen") {
           subvariations++;
         } else if (tokens[i].type === "ParenClose") {
+          if (subvariations === 0) break;
           subvariations--;
         }
-        variation.push(tokens[i]);
         i++;
       }
-      const newTree = innerParsePGN(
-        variation,
+      // Parse the variation passing the cloned parent position directly
+      // This avoids re-parsing prevNode.fen from scratch
+      const { tree: newTree } = innerParsePGN(
+        tokens,
         prevNode.fen,
         root.halfMoves - 1,
+        varStart,
+        i,
+        prevPos,
       );
       if (newTree.root.children.length > 0) {
         prevNode.children.push(newTree.root.children[0]);
       }
+      i++; // skip ParenClose
     } else if (token.type === "ParenClose") {
+      i++;
     } else if (token.type === "Nag") {
       root.annotations.push(NAG_INFO.get(token.value) || "");
       root.annotations.sort((a, b) => {
         return ANNOTATION_INFO[a].nag - ANNOTATION_INFO[b].nag;
       });
+      i++;
     } else if (token.type === "San") {
-      const [pos, error] = positionFromFen(root.fen);
-      if (error) {
-        continue;
-      }
+      // Use the running position directly — no positionFromFen() call!
       let move = parseSan(pos, token.value);
       if (!move) {
         move = parseUci(token.value);
         if (!move) {
+          i++;
           continue;
         }
       }
       const san = makeSan(pos, move);
+
+      // Save prev position before playing the move
+      prevPos = pos.clone();
       pos.play(move);
 
       const newTree = createNode({
@@ -482,11 +529,14 @@ function innerParsePGN(
 
       prevNode = root;
       root = newTree;
+      i++;
     } else if (token.type === "Outcome") {
       break;
+    } else {
+      i++;
     }
   }
-  return tree;
+  return { tree, endPos: i };
 }
 
 export async function parsePGN(
@@ -500,10 +550,13 @@ export async function parsePGN(
 
   const [pos] = positionFromFen(fen);
 
-  const tree = innerParsePGN(
+  const { tree } = innerParsePGN(
     tokens,
-    initialFen?.trim() || headers.fen.trim(),
+    fen,
     pos?.turn === "black" ? 1 : 0,
+    0,
+    undefined,
+    pos ?? undefined,
   );
   tree.headers = headers;
   tree.position = headers.start ?? [];

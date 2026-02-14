@@ -1,6 +1,7 @@
 import { commands } from "@/bindings";
 import { type FileMetadata, fileMetadataSchema } from "@/components/files/file";
 import type { TreeStoreState } from "@/state/store/tree";
+import { injectTreeState } from "@/state/store/treeStorage";
 import { resolve } from "@tauri-apps/api/path";
 import { save } from "@tauri-apps/plugin-dialog";
 import { z } from "zod";
@@ -83,7 +84,8 @@ export async function createTab({
         tree.position = position;
       }
     }
-    sessionStorage.setItem(id, JSON.stringify({ version: 0, state: tree }));
+    // Inject directly into memory cache — avoids expensive JSON.stringify + sessionStorage write
+    injectTreeState(id, tree);
   }
 
   setTabs((prev) => {

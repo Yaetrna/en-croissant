@@ -2,8 +2,9 @@ import { Comment } from "@/components/common/Comment";
 import { TreeStateContext } from "@/components/common/TreeStateContext";
 import { currentInvisibleAtom, tableViewAtom } from "@/state/atoms";
 import { keyMapAtom } from "@/state/keybinds";
+import { stripClock } from "@/utils/chess";
 import { formatScore } from "@/utils/score";
-import { type TreeNode, getNodeAtPath } from "@/utils/treeReducer";
+import { type TreeNode, getNodeAtPath, treeIterator } from "@/utils/treeReducer";
 import {
   ActionIcon,
   Box,
@@ -33,7 +34,7 @@ import {
 import { INITIAL_FEN } from "chessops/fen";
 import equal from "fast-deep-equal";
 import { useAtom, useAtomValue } from "jotai";
-import { memo, useContext, useEffect, useRef, useState } from "react";
+import { memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import React from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useTranslation } from "react-i18next";
@@ -41,6 +42,7 @@ import { useStore } from "zustand";
 import CompleteMoveCell from "./CompleteMoveCell";
 import * as styles from "./GameNotation.css";
 import OpeningName from "./OpeningName";
+import { TranspositionContext } from "./TranspositionContext";
 
 function GameNotation({
   topBar,
@@ -49,7 +51,23 @@ function GameNotation({
   const store = useContext(TreeStateContext)!;
   const currentFen = useStore(store, (s) => s.currentNode().fen);
   const headers = useStore(store, (s) => s.headers);
-  const rootComment = useStore(store, (s) => s.root.comment);
+  const root = useStore(store, (s) => s.root);
+  const rootComment = root.comment;
+
+  // Build transposition index O(N) once per root change, shared via context
+  const transpositionIndex = useMemo(() => {
+    const index = new Map<string, number[][]>();
+    for (const item of treeIterator(root)) {
+      const stripped = stripClock(item.node.fen);
+      let arr = index.get(stripped);
+      if (!arr) {
+        arr = [];
+        index.set(stripped, arr);
+      }
+      arr.push(item.position);
+    }
+    return index;
+  }, [root]);
 
   const viewport = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLSpanElement>(null);
@@ -84,6 +102,7 @@ function GameNotation({
   useHotkeys(keyMap.TOGGLE_BLUR.keys, () => setInvisible((v) => !v));
 
   return (
+    <TranspositionContext.Provider value={transpositionIndex}>
     <Paper
       withBorder
       flex={1}
@@ -167,6 +186,7 @@ function GameNotation({
         </Stack>
       </Group>
     </Paper>
+    </TranspositionContext.Provider>
   );
 }
 

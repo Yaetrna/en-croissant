@@ -60,7 +60,6 @@ import { useHotkeys } from "react-hotkeys-hook";
 import { useTranslation } from "react-i18next";
 import { match } from "ts-pattern";
 import { useStore } from "zustand";
-import { useShallow } from "zustand/react/shallow";
 import ShowMaterial from "../common/ShowMaterial";
 import { TreeStateContext } from "../common/TreeStateContext";
 import FideInfo from "../databases/FideInfo";
@@ -111,11 +110,11 @@ function Board({
 
   const store = useContext(TreeStateContext)!;
 
-  const root = useStore(store, (s) => s.root);
   const rootFen = useStore(store, (s) => s.root.fen);
-  const moves = useStore(
-    store,
-    useShallow((s) => getVariationLine(s.root, s.position)),
+  const position = useStore(store, (s) => s.position);
+  const moves = useMemo(
+    () => getVariationLine(store.getState().root, position),
+    [store, position, rootFen],
   );
   const headers = useStore(store, (s) => s.headers);
   const currentNode = useStore(store, (s) => s.currentNode());
@@ -163,7 +162,7 @@ function Board({
   const toggleOrientation = () =>
     setHeaders({
       ...headers,
-      fen: root.fen,
+      fen: rootFen,
       orientation: orientation === "black" ? "white" : "black",
     });
 
@@ -179,20 +178,31 @@ function Board({
     }),
   );
 
+  // O(1) FEN lookup map for practice positions
+  const deckFenMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let idx = 0; idx < deck.positions.length; idx++) {
+      if (!map.has(deck.positions[idx].fen)) {
+        map.set(deck.positions[idx].fen, idx);
+      }
+    }
+    return map;
+  }, [deck.positions]);
+
   async function makeMove(move: NormalMove) {
     if (!pos) return;
     const san = makeSan(pos, move);
     if (practicing) {
-      const c = deck.positions.find((c) => c.fen === currentNode.fen);
-      if (!c) {
+      const i = deckFenMap.get(currentNode.fen);
+      if (i === undefined) {
         return;
       }
+      const c = deck.positions[i];
 
       let isRecalled = true;
       if (san !== c?.answer) {
         isRecalled = false;
       }
-      const i = deck.positions.indexOf(c);
 
       if (!isRecalled) {
         notifications.show({
@@ -293,7 +303,7 @@ function Board({
 
   const materialDiff = getMaterialDiff(currentNode.fen);
   const practiceLock =
-    !!practicing && !deck.positions.find((c) => c.fen === currentNode.fen);
+    !!practicing && !deckFenMap.has(currentNode.fen);
 
   const movableColor: "white" | "black" | "both" | undefined = useMemo(() => {
     return practiceLock

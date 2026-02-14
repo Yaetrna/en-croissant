@@ -12,15 +12,15 @@ import {
   createNode,
   defaultTree,
   getNodeAtPath,
-  treeIteratorMainLine,
 } from "@/utils/treeReducer";
 import type { DrawShape } from "@lichess-org/chessground/draw";
-import { type Move, isNormal } from "chessops";
+import type { Move } from "chessops";
 import { INITIAL_FEN, makeFen } from "chessops/fen";
 import { makeSan, parseSan } from "chessops/san";
-import { type Draft, produce } from "immer";
+import { produce } from "immer";
 import { type StateCreator, createStore } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
+import { persist } from "zustand/middleware";
+import { createDebouncedStorage } from "./treeStorage";
 
 export interface TreeStoreState extends TreeState {
   currentNode: () => TreeNode;
@@ -112,28 +112,25 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
     },
 
     setFen: (fen) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          state.root = defaultTree(fen).root;
-          state.position = [];
-        }),
-      ),
+      set((state) => ({
+        ...state,
+        dirty: true,
+        root: defaultTree(fen).root,
+        position: [],
+      })),
 
     goToNext: () =>
       set((state) => {
         const node = getNodeAtPath(state.root, state.position);
-        const [pos] = positionFromFen(node.fen);
-        if (!pos || !node.children[0]?.move) return state;
-        const san = makeSan(pos, node.children[0].move);
-        playSound(san.includes("x"), san.includes("+"));
-        if (node && node.children.length > 0) {
-          return {
-            ...state,
-            position: [...state.position, 0],
-          };
-        }
-        return state;
+        if (!node || node.children.length === 0) return state;
+        const child = node.children[0];
+        if (!child.san) return state;
+        // Use pre-computed SAN to determine sound — no FEN parse needed
+        playSound(child.san.includes("x"), child.san.includes("+"));
+        return {
+          ...state,
+          position: [...state.position, 0],
+        };
       }),
     goToPrevious: () =>
       set((state) => ({
@@ -142,32 +139,30 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       })),
 
     goToAnnotation: (annotation, color) =>
-      set(
-        produce((state) => {
-          const colorN = color === "white" ? 1 : 0;
+      set((state) => {
+        const colorN = color === "white" ? 1 : 0;
 
-          let p: number[] = state.position;
-          let node = getNodeAtPath(state.root, p);
-          while (true) {
-            if (node.children.length === 0) {
-              p = [];
-            } else {
-              p.push(0);
-            }
-
-            node = getNodeAtPath(state.root, p);
-
-            if (
-              node.annotations.includes(annotation) &&
-              node.halfMoves % 2 === colorN
-            ) {
-              break;
-            }
+        let p: number[] = [...state.position];
+        let node = getNodeAtPath(state.root, p);
+        while (true) {
+          if (node.children.length === 0) {
+            p = [];
+          } else {
+            p = [...p, 0];
           }
 
-          state.position = p;
-        }),
-      ),
+          node = getNodeAtPath(state.root, p);
+
+          if (
+            node.annotations.includes(annotation) &&
+            node.halfMoves % 2 === colorN
+          ) {
+            break;
+          }
+        }
+
+        return { ...state, position: p };
+      }),
 
     makeMove: ({
       payload,
@@ -176,71 +171,160 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       clock,
       changeHeaders = true,
     }) => {
-      set(
-        produce((state) => {
-          if (typeof payload === "string") {
-            const node = getNodeAtPath(state.root, state.position);
-            if (!node) return;
-            const [pos] = positionFromFen(node.fen);
-            if (!pos) return;
-            const move = parseSan(pos, payload);
-            if (!move) return;
-            payload = move;
-          }
-          makeMove({
-            state,
-            move: payload,
-            last: false,
-            changePosition,
-            changeHeaders,
-            mainline,
-            clock,
-          });
-        }),
-      );
+      set((state) => {
+        const curNode = getNodeAtPath(state.root, state.position);
+        if (!curNode) return state;
+        const [pos] = positionFromFen(curNode.fen);
+        if (!pos) return state;
+
+        let move: Move;
+        if (typeof payload === "string") {
+          const m = parseSan(pos, payload);
+          if (!m) return state;
+          move = m;
+        } else {
+          move = payload;
+        }
+
+        const san = makeSan(pos, move);
+        if (san === "--") return state;
+
+        // FAST PATH: move already exists as a child — just navigate, no tree clone
+        const existingIdx = curNode.children.findIndex((n) => n.san === san);
+        if (existingIdx !== -1) {
+          playSound(san.includes("x"), san.includes("+"));
+          if (changePosition === false) return state;
+          return {
+            ...state,
+            position: [...state.position, existingIdx],
+          };
+        }
+
+        // SLOW PATH: new move — clone tree and add node
+        const newRoot = clonePath(state.root, state.position);
+        const mutableState: TreeState = {
+          root: newRoot,
+          position: [...state.position],
+          headers: { ...state.headers },
+          dirty: state.dirty,
+          report: state.report,
+        };
+        makeMoveOnTree({
+          state: mutableState,
+          move,
+          last: false,
+          changePosition,
+          changeHeaders,
+          mainline,
+          clock,
+        });
+        return {
+          ...state,
+          root: mutableState.root,
+          position: mutableState.position,
+          headers: mutableState.headers,
+          dirty: mutableState.dirty,
+        };
+      });
     },
 
     appendMove: ({ payload, clock }) =>
-      set(
-        produce((state) => {
-          makeMove({ state, move: payload, last: true, clock });
-        }),
-      ),
+      set((state) => {
+        // Find end of mainline for cloning
+        const endPath: number[] = [];
+        let n = state.root;
+        while (n.children.length > 0) {
+          endPath.push(0);
+          n = n.children[0];
+        }
+        const newRoot = clonePath(state.root, endPath);
+        const mutableState: TreeState = {
+          root: newRoot,
+          position: [...state.position],
+          headers: { ...state.headers },
+          dirty: state.dirty,
+          report: state.report,
+        };
+        makeMoveOnTree({ state: mutableState, move: payload, last: true, clock });
+        return {
+          ...state,
+          root: mutableState.root,
+          position: mutableState.position,
+          headers: mutableState.headers,
+          dirty: mutableState.dirty,
+        };
+      }),
 
     makeMoves: ({ payload, mainline, changeHeaders = true }) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          const node = getNodeAtPath(state.root, state.position);
-          const [pos] = positionFromFen(node.fen);
-          if (!pos) return;
-          for (const [i, move] of payload.entries()) {
-            const m = parseSanOrUci(pos, move);
-            if (!m) return;
-            pos.play(m);
-            makeMove({
-              state,
-              move: m,
-              last: false,
-              mainline,
-              sound: i === payload.length - 1,
-              changeHeaders,
-            });
+      set((state) => {
+        let curNode = getNodeAtPath(state.root, state.position);
+        if (!curNode) return state;
+        const [pos] = positionFromFen(curNode.fen);
+        if (!pos) return state;
+
+        // Fast-path prefix: follow existing children without cloning
+        let position = [...state.position];
+        let fastIdx = 0;
+        for (; fastIdx < payload.length; fastIdx++) {
+          const m = parseSanOrUci(pos, payload[fastIdx]);
+          if (!m) return state;
+          const san = makeSan(pos, m);
+          const childIdx = curNode.children.findIndex((n) => n.san === san);
+          if (childIdx === -1) break; // need to add new nodes from here
+          pos.play(m);
+          position.push(childIdx);
+          curNode = curNode.children[childIdx];
+        }
+
+        if (fastIdx === payload.length) {
+          // All moves existed — just navigate, no tree mutation
+          if (payload.length > 0) {
+            const lastSan = curNode.san || "";
+            playSound(lastSan.includes("x"), lastSan.includes("+"));
           }
-        }),
-      ),
+          return { ...state, position };
+        }
+
+        // Slow path: clone tree from current position and add remaining moves
+        const newRoot = clonePath(state.root, position);
+        const mutableState: TreeState = {
+          root: newRoot,
+          position,
+          headers: { ...state.headers },
+          dirty: true,
+          report: state.report,
+        };
+        for (let i = fastIdx; i < payload.length; i++) {
+          const m = parseSanOrUci(pos, payload[i]);
+          if (!m) break;
+          pos.play(m);
+          makeMoveOnTree({
+            state: mutableState,
+            move: m,
+            last: false,
+            mainline,
+            sound: i === payload.length - 1,
+            changeHeaders,
+          });
+        }
+        return {
+          ...state,
+          root: mutableState.root,
+          position: mutableState.position,
+          headers: mutableState.headers,
+          dirty: mutableState.dirty,
+        };
+      }),
     goToEnd: () =>
-      set(
-        produce((state) => {
-          const endPosition: number[] = [];
-          let currentNode = state.root;
-          while (currentNode.children.length > 0) {
-            endPosition.push(0);
-            currentNode = currentNode.children[0];
-          }
-          state.position = endPosition;
-        }),
-      ),
+      set((state) => {
+        const endPosition: number[] = [];
+        let currentNode = state.root;
+        while (currentNode.children.length > 0) {
+          endPosition.push(0);
+          currentNode = currentNode.children[0];
+        }
+        return { ...state, position: endPosition };
+      }),
     goToStart: () =>
       set((state) => ({
         ...state,
@@ -252,109 +336,116 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
         position: move,
       })),
     goToBranchStart: () => {
-      set(
-        produce((state) => {
-          if (
-            state.position.length > 0 &&
-            state.position[state.position.length - 1] !== 0
-          ) {
-            state.position = state.position.slice(0, -1);
-          }
+      set((state) => {
+        let pos = state.position;
+        if (
+          pos.length > 0 &&
+          pos[pos.length - 1] !== 0
+        ) {
+          pos = pos.slice(0, -1);
+        }
 
-          while (
-            state.position.length > 0 &&
-            state.position[state.position.length - 1] === 0
-          ) {
-            state.position = state.position.slice(0, -1);
-          }
-        }),
-      );
+        while (
+          pos.length > 0 &&
+          pos[pos.length - 1] === 0
+        ) {
+          pos = pos.slice(0, -1);
+        }
+
+        return { ...state, position: pos };
+      });
     },
 
     goToBranchEnd: () => {
-      set(
-        produce((state) => {
-          let currentNode = getNodeAtPath(state.root, state.position);
-          while (currentNode.children.length > 0) {
-            state.position.push(0);
-            currentNode = currentNode.children[0];
-          }
-        }),
-      );
+      set((state) => {
+        const newPos = [...state.position];
+        let currentNode = getNodeAtPath(state.root, newPos);
+        while (currentNode.children.length > 0) {
+          newPos.push(0);
+          currentNode = currentNode.children[0];
+        }
+        return { ...state, position: newPos };
+      });
     },
 
     nextBranch: () =>
-      set(
-        produce((state) => {
-          if (state.position.length === 0) return;
+      set((state) => {
+        if (state.position.length === 0) return state;
 
-          const parent = getNodeAtPath(state.root, state.position.slice(0, -1));
-          const branchIndex = state.position[state.position.length - 1];
-          const node = parent.children[branchIndex];
+        let pos = state.position;
+        const parent = getNodeAtPath(state.root, pos.slice(0, -1));
+        const branchIndex = pos[pos.length - 1];
+        const node = parent.children[branchIndex];
 
-          // Makes the navigation more fluid and compatible with next/previous branching
-          if (node.children.length >= 2 && parent.children.length <= 1) {
-            state.position.push(0);
-          }
+        // Makes the navigation more fluid and compatible with next/previous branching
+        if (node.children.length >= 2 && parent.children.length <= 1) {
+          pos = [...pos, 0];
+        }
 
-          state.position = [
-            ...state.position.slice(0, -1),
+        return {
+          ...state,
+          position: [
+            ...pos.slice(0, -1),
             (branchIndex + 1) % parent.children.length,
-          ];
-        }),
-      ),
+          ],
+        };
+      }),
     previousBranch: () =>
-      set(
-        produce((state) => {
-          if (state.position.length === 0) return;
+      set((state) => {
+        if (state.position.length === 0) return state;
 
-          const parent = getNodeAtPath(state.root, state.position.slice(0, -1));
-          const branchIndex = state.position[state.position.length - 1];
-          const node = parent.children[branchIndex];
+        let pos = state.position;
+        const parent = getNodeAtPath(state.root, pos.slice(0, -1));
+        const branchIndex = pos[pos.length - 1];
+        const node = parent.children[branchIndex];
 
-          // Makes the navigation more fluid and compatible with next/previous branching
-          if (node.children.length >= 2 && parent.children.length <= 1) {
-            state.position.push(0);
-          }
+        // Makes the navigation more fluid and compatible with next/previous branching
+        if (node.children.length >= 2 && parent.children.length <= 1) {
+          pos = [...pos, 0];
+        }
 
-          state.position = [
-            ...state.position.slice(0, -1),
+        return {
+          ...state,
+          position: [
+            ...pos.slice(0, -1),
             (branchIndex + parent.children.length - 1) % parent.children.length,
-          ];
-        }),
-      ),
+          ],
+        };
+      }),
 
     nextBranching: () =>
-      set(
-        produce((state) => {
-          let node = getNodeAtPath(state.root, state.position);
-          let branchCount = node.children.length;
+      set((state) => {
+        let node = getNodeAtPath(state.root, state.position);
+        let branchCount = node.children.length;
 
-          if (branchCount === 0) return;
+        if (branchCount === 0) return state;
 
-          do {
-            state.position.push(0);
-            node = node.children[0];
-            branchCount = node.children.length;
-          } while (branchCount === 1);
-        }),
-      ),
+        const newPos = [...state.position];
+        do {
+          newPos.push(0);
+          node = node.children[0];
+          branchCount = node.children.length;
+        } while (branchCount === 1);
+
+        return { ...state, position: newPos };
+      }),
 
     previousBranching: () =>
-      set(
-        produce((state) => {
-          let node = getNodeAtPath(state.root, state.position);
-          let branchCount = node.children.length;
+      set((state) => {
+        let node = getNodeAtPath(state.root, state.position);
+        let branchCount = node.children.length;
 
-          if (state.position.length === 0) return;
+        if (state.position.length === 0) return state;
 
-          do {
-            state.position = state.position.slice(0, -1);
-            node = getNodeAtPath(state.root, state.position);
-            branchCount = node.children.length;
-          } while (branchCount === 1 && state.position.length > 0);
-        }),
-      ),
+        let newPos = [...state.position];
+        do {
+          newPos = newPos.slice(0, -1);
+          node = getNodeAtPath(state.root, newPos);
+          branchCount = node.children.length;
+        } while (branchCount === 1 && newPos.length > 0);
+
+        return { ...state, position: newPos };
+      }),
 
     deleteMove: (path) =>
       set(
@@ -394,78 +485,71 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       navigator.clipboard.writeText(pgn);
     },
     setStart: (start) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          state.headers.start = start;
-        }),
-      ),
+      set((state) => ({
+        ...state,
+        dirty: true,
+        headers: { ...state.headers, start },
+      })),
     setAnnotation: (payload) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          const node = getNodeAtPath(state.root, state.position);
-          if (node) {
-            if (node.annotations.includes(payload)) {
-              node.annotations = node.annotations.filter((a) => a !== payload);
-            } else {
-              const newAnnotations = node.annotations.filter(
-                (a) =>
-                  !ANNOTATION_INFO[a].group ||
-                  ANNOTATION_INFO[a].group !== ANNOTATION_INFO[payload].group,
-              );
-              node.annotations = [...newAnnotations, payload].sort((a, b) =>
-                ANNOTATION_INFO[a].nag > ANNOTATION_INFO[b].nag ? 1 : -1,
-              );
-            }
-          }
-        }),
-      ),
+      set((state) => {
+        const newRoot = clonePath(state.root, state.position);
+        const node = getNodeAtPath(newRoot, state.position);
+        if (!node) return state;
+        if (node.annotations.includes(payload)) {
+          node.annotations = node.annotations.filter((a) => a !== payload);
+        } else {
+          const newAnnotations = node.annotations.filter(
+            (a) =>
+              !ANNOTATION_INFO[a].group ||
+              ANNOTATION_INFO[a].group !== ANNOTATION_INFO[payload].group,
+          );
+          node.annotations = [...newAnnotations, payload].sort((a, b) =>
+            ANNOTATION_INFO[a].nag > ANNOTATION_INFO[b].nag ? 1 : -1,
+          );
+        }
+        return { ...state, root: newRoot, dirty: true };
+      }),
     setComment: (payload) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          const node = getNodeAtPath(state.root, state.position);
-          if (node) {
-            node.comment = payload;
-          }
-        }),
-      ),
+      set((state) => {
+        const newRoot = clonePath(state.root, state.position);
+        const node = getNodeAtPath(newRoot, state.position);
+        if (!node) return state;
+        node.comment = payload;
+        return { ...state, root: newRoot, dirty: true };
+      }),
     setHeaders: (headers) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          state.headers = headers;
-          if (headers.fen && headers.fen !== state.root.fen) {
-            state.root = defaultTree(headers.fen).root;
-            state.position = [];
-          }
-        }),
-      ),
+      set((state) => {
+        if (headers.fen && headers.fen !== state.root.fen) {
+          return {
+            ...state,
+            dirty: true,
+            headers,
+            root: defaultTree(headers.fen).root,
+            position: [],
+          };
+        }
+        return { ...state, dirty: true, headers };
+      }),
     setResult: (result) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          state.headers.result = result;
-        }),
-      ),
+      set((state) => ({
+        ...state,
+        dirty: true,
+        headers: { ...state.headers, result },
+      })),
     setShapes: (shapes) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          setShapes(state, shapes);
-        }),
-      ),
+      set((state) => {
+        const newRoot = clonePath(state.root, state.position);
+        setShapes({ root: newRoot, position: state.position } as TreeState, shapes);
+        return { ...state, root: newRoot, dirty: true };
+      }),
     setScore: (score) =>
-      set(
-        produce((state) => {
-          state.dirty = true;
-          const node = getNodeAtPath(state.root, state.position);
-          if (node) {
-            node.score = score;
-          }
-        }),
-      ),
+      set((state) => {
+        const newRoot = clonePath(state.root, state.position);
+        const node = getNodeAtPath(newRoot, state.position);
+        if (!node) return state;
+        node.score = score;
+        return { ...state, root: newRoot, dirty: true };
+      }),
     addAnalysis: (analysis) =>
       set(
         produce((state) => {
@@ -475,30 +559,35 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
       ),
 
     setReportInProgress: (value: boolean) => {
-      set(
-        produce((state: Draft<TreeStoreState>) => {
-          state.report.inProgress = value;
-        }),
-      );
+      set((state) => ({
+        ...state,
+        report: { ...state.report, inProgress: value },
+      }));
     },
 
     clearShapes: () =>
-      set(
-        produce((state) => {
-          const node = getNodeAtPath(state.root, state.position);
-          if (node && node.shapes.length > 0) {
-            state.dirty = true;
-            node.shapes = [];
-          }
-        }),
-      ),
+      set((state) => {
+        const node = getNodeAtPath(state.root, state.position);
+        if (!node || node.shapes.length === 0) return state;
+        const newRoot = clonePath(state.root, state.position);
+        const clonedNode = getNodeAtPath(newRoot, state.position)!;
+        clonedNode.shapes = [];
+        return { ...state, root: newRoot, dirty: true };
+      }),
   });
 
   if (id) {
     return createStore<TreeStoreState>()(
       persist(stateCreator, {
         name: id,
-        storage: createJSONStorage(() => sessionStorage),
+        storage: createDebouncedStorage<TreeStoreState>(),
+        partialize: (state) => ({
+          root: state.root,
+          position: state.position,
+          headers: state.headers,
+          dirty: state.dirty,
+          report: state.report,
+        }) as TreeStoreState,
       }),
     );
   }
@@ -506,7 +595,26 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
   return createStore<TreeStoreState>()(stateCreator);
 };
 
-function makeMove({
+/**
+ * Clone nodes along a path for structural sharing.
+ * Only nodes on the path are cloned; all others share references.
+ */
+function clonePath(root: TreeNode, path: number[]): TreeNode {
+  const newRoot: TreeNode = { ...root, children: [...root.children] };
+  let current = newRoot;
+  for (const idx of path) {
+    if (idx >= current.children.length) break;
+    const clonedChild: TreeNode = {
+      ...current.children[idx],
+      children: [...current.children[idx].children],
+    };
+    current.children[idx] = clonedChild;
+    current = clonedChild;
+  }
+  return newRoot;
+}
+
+function makeMoveOnTree({
   state,
   move,
   last,
@@ -525,12 +633,22 @@ function makeMove({
   clock?: number;
   sound?: boolean;
 }) {
-  const mainLine = Array.from(treeIteratorMainLine(state.root));
-  const position = last
-    ? mainLine[mainLine.length - 1].position
-    : state.position;
-  const moveNode = getNodeAtPath(state.root, position);
-  if (!moveNode) return;
+  // Find position: walk mainline for last=true, else use current
+  let position: number[];
+  let moveNode: TreeNode;
+  if (last) {
+    position = [];
+    moveNode = state.root;
+    while (moveNode.children.length > 0) {
+      position.push(0);
+      moveNode = moveNode.children[0];
+    }
+  } else {
+    position = state.position;
+    const node = getNodeAtPath(state.root, position);
+    if (!node) return;
+    moveNode = node;
+  }
   const [pos] = positionFromFen(moveNode.fen);
   if (!pos) return;
   const san = makeSan(pos, move);
@@ -560,6 +678,11 @@ function makeMove({
   const i = moveNode.children.findIndex((n) => n.san === san);
   if (i !== -1) {
     if (changePosition) {
+      // Clone child for structural sharing (safe for subsequent mutations)
+      moveNode.children[i] = {
+        ...moveNode.children[i],
+        children: [...moveNode.children[i].children],
+      };
       if (state.position === position) {
         state.position.push(i);
       } else {
@@ -608,19 +731,20 @@ function is50MoveRule(state: TreeState) {
   let node = state.root;
   let count = 0;
   for (const i of state.position) {
-    count += 1;
-    const [pos] = positionFromFen(node.fen);
-    if (!pos) return false;
-    if (
-      node.move &&
-      isNormal(node.move) &&
-      (node.move.promotion ||
-        node.san?.includes("x") ||
-        pos.board.get(node.move.from)?.role === "pawn")
-    ) {
-      count = 0;
-    }
     node = node.children[i];
+    count += 1;
+    if (node.san) {
+      const ch = node.san.charCodeAt(0);
+      // Pawn moves start with lowercase file letter (a-h = 97-104);
+      // captures contain 'x'; promotions contain '='
+      if (
+        (ch >= 97 && ch <= 104) || // pawn move
+        node.san.includes("x") || // capture
+        node.san.includes("=") // promotion
+      ) {
+        count = 0;
+      }
+    }
   }
   return count >= 100;
 }

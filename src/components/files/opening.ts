@@ -27,13 +27,14 @@ export function buildFromTree(
   start: number[],
 ) {
   const cards: Position[] = [];
+  const seenFens = new Set<string>();
   const iterator = treeIterator(tree);
   for (const item of iterator) {
     if (
       item.node.children.length === 0 ||
       isPrefix(item.position, start) ||
       !item.node.children[0].san ||
-      cards.find((c) => c.fen === item.node.fen)
+      seenFens.has(item.node.fen)
     ) {
       continue;
     }
@@ -41,6 +42,7 @@ export function buildFromTree(
       (color === "white" && item.node.halfMoves % 2 === 0) ||
       (color === "black" && item.node.halfMoves % 2 === 1)
     ) {
+      seenFens.add(item.node.fen);
       cards.push({
         fen: item.node.fen,
         answer: item.node.children[0].san,

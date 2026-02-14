@@ -26,7 +26,6 @@ import { useAtom, useAtomValue } from "jotai";
 import { startTransition, useContext, useEffect, useMemo } from "react";
 import { match } from "ts-pattern";
 import { useStore } from "zustand";
-import { useShallow } from "zustand/react/shallow";
 import { TreeStateContext } from "../common/TreeStateContext";
 
 function EvalListener() {
@@ -35,10 +34,11 @@ function EvalListener() {
   const store = useContext(TreeStateContext)!;
   const is960 = useStore(store, (s) => s.headers.variant === "Chess960");
   const fen = useStore(store, (s) => s.root.fen);
+  const position = useStore(store, (s) => s.position);
 
-  const moves = useStore(
-    store,
-    useShallow((s) => getVariationLine(s.root, s.position, is960)),
+  const moves = useMemo(
+    () => getVariationLine(store.getState().root, position, is960),
+    [store, position, fen, is960],
   );
 
   const [pos, error] = positionFromFen(fen);
