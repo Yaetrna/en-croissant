@@ -10,6 +10,7 @@ import type { Completion, Puzzle } from "@/utils/puzzles";
 import { getNodeAtPath, treeIteratorMainLine } from "@/utils/treeReducer";
 import { Box } from "@mantine/core";
 import { useElementSize, useForceUpdate } from "@mantine/hooks";
+import type { DrawShape } from "@lichess-org/chessground/draw";
 import {
   Chess,
   type Move,
@@ -21,7 +22,7 @@ import { chessgroundDests, chessgroundMove } from "chessops/compat";
 import { parseFen } from "chessops/fen";
 import equal from "fast-deep-equal";
 import { useAtom, useAtomValue } from "jotai";
-import { useContext, useState } from "react";
+import { useCallback, useContext, useState } from "react";
 import { useStore } from "zustand";
 import PromotionModal from "../boards/PromotionModal";
 import { TreeStateContext } from "../common/TreeStateContext";
@@ -76,6 +77,7 @@ function PuzzleBoard({
       : "white"
     : "white";
   const [pendingMove, setPendingMove] = useState<NormalMove | null>(null);
+  const [userShapes, setUserShapes] = useState<DrawShape[]>([]);
 
   const dests = chessgroundDests(pos!);
   const turn = pos?.turn || "white";
@@ -184,6 +186,10 @@ function PuzzleBoard({
           turnColor={turn}
           fen={currentNode.fen}
           check={moveHighlight && pos?.isCheck()}
+          drawable={{
+            autoShapes: userShapes,
+            onChange: setUserShapes,
+          }}
         />
       </Box>
     </Box>
