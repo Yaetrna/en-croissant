@@ -671,7 +671,7 @@ pub async fn analyze_database(
                 .and_then(|f| Fen::from_ascii(f.as_bytes()).ok())
                 .unwrap_or_default();
             let fen_str = fen.to_string();
-            let decoded = crate::db::encoding::decode_moves(moves_blob, fen).ok()?;
+            let decoded = crate::db::encoding::decode_moves_uci(moves_blob, fen).ok()?;
             Some((game_id, fen_str, decoded))
         })
         .collect();
