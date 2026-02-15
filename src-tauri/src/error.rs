@@ -99,6 +99,9 @@ pub enum Error {
     #[error("Engine disconnected")]
     EngineDisconnected,
 
+    #[error("Engine not found: {0}")]
+    EngineNotFound(String),
+
     #[error("Analysis cancelled")]
     AnalysisCancelled,
 }

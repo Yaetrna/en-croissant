@@ -608,89 +608,6 @@ pub async fn analyze_game(
     Ok(analysis)
 }
 
-/// Analyze a single game given its FEN and UCI moves, returning per-move scores as JSON.
-/// This is a helper used by `analyze_database`.
-async fn analyze_single_game_moves(
-    engine_path: &PathBuf,
-    go_mode: &GoMode,
-    game_fen: &str,
-    uci_moves: &[String],
-) -> Result<(Vec<f64>, u32), Error> {
-    let (mut proc, mut reader) = EngineProcess::new(engine_path.clone()).await?;
-
-    let fen = Fen::from_ascii(game_fen.as_bytes())?;
-    let mut chess: Chess = fen.clone().into_position(CastlingMode::Chess960)?;
-
-    // Build list of positions to evaluate (one per ply including starting position)
-    let mut positions: Vec<(String, Vec<String>)> = vec![(game_fen.to_string(), vec![])];
-
-    for (i, m) in uci_moves.iter().enumerate() {
-        let uci = UciMove::from_ascii(m.as_bytes())?;
-        let mv = uci.to_move(&chess)?;
-        chess.play_unchecked(&mv);
-        if !chess.is_game_over() || i == uci_moves.len() - 1 {
-            positions.push((
-                game_fen.to_string(),
-                uci_moves.iter().take(i + 1).cloned().collect(),
-            ));
-        }
-    }
-
-    let mut scores: Vec<f64> = Vec::new();
-    let mut max_depth: u32 = 0;
-
-    for (fen_str, moves) in &positions {
-        let extra_options = vec![EngineOption {
-            name: "MultiPV".to_string(),
-            value: "1".to_string(),
-        }];
-
-        proc.set_options(EngineOptions {
-            fen: fen_str.clone(),
-            moves: moves.clone(),
-            extra_options,
-        })
-        .await?;
-
-        proc.go(go_mode).await?;
-
-        let mut best_score: Option<f64> = None;
-        let mut best_depth: u32 = 0;
-
-        while let Ok(Some(line)) = reader.next_line().await {
-            match parse_one(&line) {
-                UciMessage::Info(attrs) => {
-                    if let Ok(bm) = parse_uci_attrs(attrs, &fen_str.parse()?, moves) {
-                        if bm.depth >= best_depth {
-                            best_depth = bm.depth;
-                            best_score = Some(match bm.score.value {
-                                ScoreValue::Cp(cp) => cp as f64 / 100.0,
-                                ScoreValue::Mate(m) => {
-                                    if m > 0 {
-                                        999.0
-                                    } else {
-                                        -999.0
-                                    }
-                                }
-                            });
-                        }
-                    }
-                }
-                UciMessage::BestMove { .. } => break,
-                _ => {}
-            }
-        }
-
-        if best_depth > max_depth {
-            max_depth = best_depth;
-        }
-        scores.push(best_score.unwrap_or(0.0));
-    }
-
-    proc.kill().await?;
-    Ok((scores, max_depth))
-}
-
 #[derive(Deserialize, Debug, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchAnalysisOptions {
@@ -718,6 +635,12 @@ pub async fn analyze_database(
 
     let engine_path = PathBuf::from(&options.engine);
 
+    // Verify the engine exists before doing anything else
+    if !engine_path.exists() {
+        state.analysis_cancel_flags.remove(&id);
+        return Err(Error::EngineNotFound(engine_path.to_string_lossy().to_string()));
+    }
+
     // Fetch all game IDs and moves that haven't been analyzed yet
     let db = &mut crate::db::get_db_or_create(
         &state,
@@ -731,6 +654,8 @@ pub async fn analyze_database(
         .load(db)?;
 
     let total_games = all_games.len();
+    info!("Batch analysis: found {} unanalyzed games", total_games);
+
     if total_games == 0 {
         update_progress(&state.progress_state, &app, id.clone(), 100.0, true)?;
         state.analysis_cancel_flags.remove(&id);
@@ -752,6 +677,14 @@ pub async fn analyze_database(
         .collect();
 
     let total = game_data.len();
+    info!("Batch analysis: {} games decoded successfully", total);
+
+    if total == 0 {
+        update_progress(&state.progress_state, &app, id.clone(), 100.0, true)?;
+        state.analysis_cancel_flags.remove(&id);
+        return Ok(0);
+    }
+
     let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let analyzed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -761,10 +694,9 @@ pub async fn analyze_database(
     ));
 
     let num_workers = options.num_workers.min(16).max(1) as usize;
-
     let mut handles = Vec::new();
 
-    for _worker_idx in 0..num_workers {
+    for worker_idx in 0..num_workers {
         let queue = Arc::clone(&queue);
         let cancel_flag = Arc::clone(&cancel_flag);
         let completed = Arc::clone(&completed);
@@ -778,6 +710,28 @@ pub async fn analyze_database(
         let pool_map = state.connection_pool.clone();
 
         let handle = tokio::spawn(async move {
+            // Spawn ONE engine per worker and reuse it for all games
+            let engine_result = EngineProcess::new(engine_path.clone()).await;
+            let (mut proc, mut reader) = match engine_result {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!(
+                        "Worker {}: failed to spawn engine: {:?}",
+                        worker_idx,
+                        e
+                    );
+                    // Drain remaining tasks from queue so progress completes
+                    loop {
+                        let task = queue.lock().await.pop_front();
+                        if task.is_none() {
+                            break;
+                        }
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return;
+                }
+            };
+
             loop {
                 if cancel_flag.load(Ordering::SeqCst) {
                     break;
@@ -790,42 +744,184 @@ pub async fn analyze_database(
 
                 let (game_id, game_fen, uci_moves) = match task {
                     Some(t) => t,
-                    None => break, // Queue empty, worker done
+                    None => break,
                 };
 
-                // Analyze this game
-                match analyze_single_game_moves(&engine_path, &go_mode, &game_fen, &uci_moves)
-                    .await
-                {
-                    Ok((scores, depth)) => {
-                        // Serialize scores as JSON
-                        let scores_json =
-                            serde_json::to_string(&scores).unwrap_or_else(|_| "[]".to_string());
+                // Skip empty games
+                if uci_moves.is_empty() {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    let done = completed.load(Ordering::SeqCst);
+                    let progress = (done as f32 / total as f32) * 100.0;
+                    let _ = update_progress(&progress_state, &app, id.clone(), progress, false);
+                    continue;
+                }
 
-                        // Write results back to DB
-                        let db_path = file.to_str().unwrap().to_string();
-                        let pool = pool_map.get(&db_path);
-                        if let Some(pool) = pool {
-                            if let Ok(mut conn) = pool.get() {
-                                let _ = diesel::update(games::table.filter(games::id.eq(game_id)))
+                // Build positions to evaluate
+                let fen_parsed = match Fen::from_ascii(game_fen.as_bytes()) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        log::warn!("Game {}: invalid FEN, skipping", game_id);
+                        completed.fetch_add(1, Ordering::SeqCst);
+                        continue;
+                    }
+                };
+                let mut chess: Chess =
+                    match fen_parsed.clone().into_position(CastlingMode::Chess960) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            log::warn!("Game {}: invalid position, skipping", game_id);
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                    };
+
+                // Collect positions: starting position + after each move
+                let mut positions: Vec<Vec<String>> = vec![vec![]];
+                let mut moves_valid = true;
+                for (i, m) in uci_moves.iter().enumerate() {
+                    let uci = match UciMove::from_ascii(m.as_bytes()) {
+                        Ok(u) => u,
+                        Err(_) => {
+                            moves_valid = false;
+                            break;
+                        }
+                    };
+                    let mv = match uci.to_move(&chess) {
+                        Ok(mv) => mv,
+                        Err(_) => {
+                            moves_valid = false;
+                            break;
+                        }
+                    };
+                    chess.play_unchecked(&mv);
+                    if !chess.is_game_over() || i == uci_moves.len() - 1 {
+                        positions
+                            .push(uci_moves.iter().take(i + 1).cloned().collect());
+                    }
+                }
+
+                if !moves_valid {
+                    log::warn!("Game {}: invalid moves, skipping", game_id);
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                }
+
+                // Analyze each position in the game using the reused engine
+                let mut scores: Vec<f64> = Vec::new();
+                let mut max_depth: u32 = 0;
+                let mut game_ok = true;
+                let fen_for_engine: Fen = match game_fen.parse() {
+                    Ok(f) => f,
+                    Err(_) => {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                        continue;
+                    }
+                };
+
+                for moves in &positions {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        game_ok = false;
+                        break;
+                    }
+
+                    let set_result = proc
+                        .set_options(EngineOptions {
+                            fen: game_fen.clone(),
+                            moves: moves.clone(),
+                            extra_options: vec![EngineOption {
+                                name: "MultiPV".to_string(),
+                                value: "1".to_string(),
+                            }],
+                        })
+                        .await;
+
+                    if let Err(e) = set_result {
+                        log::warn!(
+                            "Game {}: engine set_options failed: {:?}",
+                            game_id,
+                            e
+                        );
+                        game_ok = false;
+                        break;
+                    }
+
+                    if let Err(e) = proc.go(&go_mode).await {
+                        log::warn!("Game {}: engine go failed: {:?}", game_id, e);
+                        game_ok = false;
+                        break;
+                    }
+
+                    let mut best_score: Option<f64> = None;
+                    let mut best_depth: u32 = 0;
+
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        match parse_one(&line) {
+                            UciMessage::Info(attrs) => {
+                                if let Ok(bm) =
+                                    parse_uci_attrs(attrs, &fen_for_engine, moves)
+                                {
+                                    if bm.depth >= best_depth {
+                                        best_depth = bm.depth;
+                                        best_score = Some(match bm.score.value {
+                                            ScoreValue::Cp(cp) => cp as f64 / 100.0,
+                                            ScoreValue::Mate(m) => {
+                                                if m > 0 {
+                                                    999.0
+                                                } else {
+                                                    -999.0
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            UciMessage::BestMove { .. } => break,
+                            _ => {}
+                        }
+                    }
+
+                    if best_depth > max_depth {
+                        max_depth = best_depth;
+                    }
+                    scores.push(best_score.unwrap_or(0.0));
+                }
+
+                if game_ok && !scores.is_empty() {
+                    // Write results to DB
+                    let scores_json = serde_json::to_string(&scores)
+                        .unwrap_or_else(|_| "[]".to_string());
+
+                    let db_path = file.to_str().unwrap().to_string();
+                    if let Some(pool) = pool_map.get(&db_path) {
+                        if let Ok(mut conn) = pool.get() {
+                            let update_result =
+                                diesel::update(games::table.filter(games::id.eq(game_id)))
                                     .set((
                                         games::analysis_scores.eq(&scores_json),
-                                        games::analysis_depth.eq(depth as i32),
+                                        games::analysis_depth.eq(max_depth as i32),
                                     ))
                                     .execute(&mut *conn);
+                            if let Err(e) = update_result {
+                                log::warn!(
+                                    "Game {}: DB write failed: {:?}",
+                                    game_id,
+                                    e
+                                );
+                            } else {
+                                analyzed_count.fetch_add(1, Ordering::SeqCst);
                             }
                         }
-                        analyzed_count.fetch_add(1, Ordering::SeqCst);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to analyze game {}: {:?}", game_id, e);
                     }
                 }
 
                 let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
                 let progress = (done as f32 / total as f32) * 100.0;
-                let _ = update_progress(&progress_state, &app, id.clone(), progress, false);
+                let _ =
+                    update_progress(&progress_state, &app, id.clone(), progress, false);
             }
+
+            // Clean up engine
+            let _ = proc.kill().await;
         });
 
         handles.push(handle);
@@ -837,6 +933,10 @@ pub async fn analyze_database(
     }
 
     let final_count = analyzed_count.load(Ordering::SeqCst) as u32;
+    info!(
+        "Batch analysis complete: {}/{} games analyzed",
+        final_count, total
+    );
 
     if cancel_flag.load(Ordering::SeqCst) {
         state.analysis_cancel_flags.remove(&id);

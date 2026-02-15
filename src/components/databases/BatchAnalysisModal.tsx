@@ -12,8 +12,9 @@ import {
   Text,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
+import { notifications } from "@mantine/notifications";
 import { useAtomValue } from "jotai";
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 interface BatchAnalysisModalProps {
@@ -40,7 +41,7 @@ function BatchAnalysisModal({
 
   const form = useForm({
     initialValues: {
-      engine: localEngines.length > 0 ? localEngines[0].id : "",
+      engine: "",
       goMode: { t: "Depth", c: 16 } as Exclude<GoMode, { t: "Infinite" }>,
       numWorkers: 2,
     },
@@ -51,6 +52,13 @@ function BatchAnalysisModal({
     },
   });
 
+  // Sync engine selection when engines load
+  useEffect(() => {
+    if (localEngines.length > 0 && !form.values.engine) {
+      form.setFieldValue("engine", localEngines[0].id);
+    }
+  }, [localEngines]);
+
   function startAnalysis() {
     const engine = localEngines.find((e) => e.id === form.values.engine);
     if (!engine) return;
@@ -58,11 +66,30 @@ function BatchAnalysisModal({
     setInProgress(true);
     onClose();
 
-    commands.analyzeDatabase(progressId, dbPath, {
-      engine: engine.path,
-      goMode: form.values.goMode,
-      numWorkers: form.values.numWorkers,
-    });
+    commands
+      .analyzeDatabase(progressId, dbPath, {
+        engine: engine.path,
+        goMode: form.values.goMode,
+        numWorkers: form.values.numWorkers,
+      })
+      .then((result) => {
+        if (result.status === "ok") {
+          notifications.show({
+            title: t("Databases.BatchAnalysis.Title"),
+            message: `${result.data} ${t("Common.Games").toLowerCase()} analyzed`,
+            color: "green",
+          });
+        } else {
+          notifications.show({
+            title: t("Databases.BatchAnalysis.Title"),
+            message: result.error,
+            color: "red",
+          });
+        }
+      })
+      .finally(() => {
+        setInProgress(false);
+      });
   }
 
   return (
