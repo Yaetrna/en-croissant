@@ -15,7 +15,7 @@ import {
 } from "@/utils/treeReducer";
 import type { DrawShape } from "@lichess-org/chessground/draw";
 import type { Move } from "chessops";
-import { INITIAL_FEN, makeFen } from "chessops/fen";
+import { makeFen } from "chessops/fen";
 import { makeSan, parseSan } from "chessops/san";
 import { produce } from "immer";
 import { type StateCreator, createStore } from "zustand";
@@ -145,12 +145,20 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
 
         let p: number[] = [...state.position];
         let node = getNodeAtPath(state.root, p);
+        const visited = new Set<string>();
         while (true) {
           if (node.children.length === 0) {
             p = [];
           } else {
             p = [...p, 0];
           }
+
+          const key = p.join(",");
+          if (visited.has(key)) {
+            // No matching annotation found, stay at current position
+            return state;
+          }
+          visited.add(key);
 
           node = getNodeAtPath(state.root, p);
 
@@ -731,12 +739,14 @@ function makeMoveOnTree({
 
 function isThreeFoldRepetition(state: TreeState, fen: string) {
   let node = state.root;
-  const fens = [INITIAL_FEN.split(" - ")[0]];
+  const extractRepetitionKey = (f: string) =>
+    f.split(" ").slice(0, 4).join(" ");
+  const fens = [extractRepetitionKey(state.root.fen)];
   for (const i of state.position) {
     node = node.children[i];
-    fens.push(node.fen.split(" - ")[0]);
+    fens.push(extractRepetitionKey(node.fen));
   }
-  return fens.filter((f) => f === fen.split(" - ")[0]).length >= 2;
+  return fens.filter((f) => f === extractRepetitionKey(fen)).length >= 2;
 }
 
 function is50MoveRule(state: TreeState) {

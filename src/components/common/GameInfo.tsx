@@ -24,8 +24,11 @@ function GameInfo({
   const { t } = useTranslation();
   const store = useContext(TreeStateContext);
   const disabled = store === null;
-  const setHeaders =
-    store !== null ? useStore(store, (s) => s.setHeaders) : () => {};
+  const setHeadersFromStore = store
+    ? // biome-ignore lint/correctness/useHookAtTopLevel: store is stable and never changes between null/non-null during the lifecycle of a single GameInfo instance
+      useStore(store, (s) => s.setHeaders)
+    : null;
+  const setHeaders = setHeadersFromStore ?? (() => {});
 
   const date = headers.date
     ? dayjs(headers.date, "YYYY.MM.DD").isValid()

@@ -23,8 +23,12 @@ export function useLocalFile<T>(
       if (text === "") {
         return;
       }
-      const data = JSON.parse(text);
-      setState(data);
+      try {
+        const data = JSON.parse(text);
+        setState(data);
+      } catch {
+        // Ignore malformed JSON, keep default value
+      }
     });
   }, [filename]);
 

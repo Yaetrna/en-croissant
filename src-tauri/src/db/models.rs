@@ -60,6 +60,8 @@ pub struct Game {
     pub fen: Option<String>,
     pub moves: Vec<u8>,
     pub pawn_home: i32,
+    pub analysis_scores: Option<String>,
+    pub analysis_depth: Option<i32>,
 }
 
 #[derive(Insertable, Debug)]

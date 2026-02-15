@@ -1,9 +1,10 @@
 export function formatNumber(value?: number): string {
-  if (!value) return "0";
+  if (value == null) return "0";
   return Intl.NumberFormat().format(value);
 }
 
 export function formatBytes(bytes: bigint | number, decimals = 2) {
+  if (Number(bytes) === 0) return "0 Bytes";
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
   const sizes = ["Bytes", "KB", "MB", "GB", "TB"];

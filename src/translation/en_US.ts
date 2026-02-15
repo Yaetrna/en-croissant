@@ -364,6 +364,11 @@ export const en_US = {
     "Databases.Delete.Message":
       "Are you sure you want to delete this database?",
     "Databases.NoSelection": "No database selected",
+    "Databases.BatchAnalysis.Title": "Batch Analysis",
+    "Databases.BatchAnalysis.Action": "Analyze All",
+    "Databases.BatchAnalysis.Completed": "Analysis Complete",
+    "Databases.BatchAnalysis.InProgress": "Analyzing...",
+    "Databases.BatchAnalysis.Workers": "Parallel Workers",
     "Databases.LoadError.Title": "There was an error loading this database",
     "Databases.LoadError.Description":
       "Check if the file exists and that it is not corrupted.",

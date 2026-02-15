@@ -21,7 +21,7 @@ export function formatScore(score: ScoreValue, precision = 2): string {
     .with("dtz", () => `DTZ${Math.abs(score.value)}`)
     .exhaustive();
   if (score.type !== "dtz") {
-    if (score.value > 0) {
+    if (score.value >= 0) {
       scoreText = `+${scoreText}`;
     }
     if (score.value < 0) {

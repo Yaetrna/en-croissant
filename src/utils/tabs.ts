@@ -49,10 +49,7 @@ export const tabSchema = z.object({
 export type Tab = z.infer<typeof tabSchema>;
 
 export function genID() {
-  function S4() {
-    return (((1 + Math.random()) * 0x10000) | 0).toString(16).substring(1);
-  }
-  return S4() + S4();
+  return crypto.randomUUID();
 }
 
 export async function createTab({

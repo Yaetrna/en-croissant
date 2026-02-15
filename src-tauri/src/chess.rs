@@ -608,6 +608,246 @@ pub async fn analyze_game(
     Ok(analysis)
 }
 
+/// Analyze a single game given its FEN and UCI moves, returning per-move scores as JSON.
+/// This is a helper used by `analyze_database`.
+async fn analyze_single_game_moves(
+    engine_path: &PathBuf,
+    go_mode: &GoMode,
+    game_fen: &str,
+    uci_moves: &[String],
+) -> Result<(Vec<f64>, u32), Error> {
+    let (mut proc, mut reader) = EngineProcess::new(engine_path.clone()).await?;
+
+    let fen = Fen::from_ascii(game_fen.as_bytes())?;
+    let mut chess: Chess = fen.clone().into_position(CastlingMode::Chess960)?;
+
+    // Build list of positions to evaluate (one per ply including starting position)
+    let mut positions: Vec<(String, Vec<String>)> = vec![(game_fen.to_string(), vec![])];
+
+    for (i, m) in uci_moves.iter().enumerate() {
+        let uci = UciMove::from_ascii(m.as_bytes())?;
+        let mv = uci.to_move(&chess)?;
+        chess.play_unchecked(&mv);
+        if !chess.is_game_over() || i == uci_moves.len() - 1 {
+            positions.push((
+                game_fen.to_string(),
+                uci_moves.iter().take(i + 1).cloned().collect(),
+            ));
+        }
+    }
+
+    let mut scores: Vec<f64> = Vec::new();
+    let mut max_depth: u32 = 0;
+
+    for (fen_str, moves) in &positions {
+        let extra_options = vec![EngineOption {
+            name: "MultiPV".to_string(),
+            value: "1".to_string(),
+        }];
+
+        proc.set_options(EngineOptions {
+            fen: fen_str.clone(),
+            moves: moves.clone(),
+            extra_options,
+        })
+        .await?;
+
+        proc.go(go_mode).await?;
+
+        let mut best_score: Option<f64> = None;
+        let mut best_depth: u32 = 0;
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            match parse_one(&line) {
+                UciMessage::Info(attrs) => {
+                    if let Ok(bm) = parse_uci_attrs(attrs, &fen_str.parse()?, moves) {
+                        if bm.depth >= best_depth {
+                            best_depth = bm.depth;
+                            best_score = Some(match bm.score.value {
+                                ScoreValue::Cp(cp) => cp as f64 / 100.0,
+                                ScoreValue::Mate(m) => {
+                                    if m > 0 {
+                                        999.0
+                                    } else {
+                                        -999.0
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+                UciMessage::BestMove { .. } => break,
+                _ => {}
+            }
+        }
+
+        if best_depth > max_depth {
+            max_depth = best_depth;
+        }
+        scores.push(best_score.unwrap_or(0.0));
+    }
+
+    proc.kill().await?;
+    Ok((scores, max_depth))
+}
+
+#[derive(Deserialize, Debug, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAnalysisOptions {
+    pub engine: String,
+    pub go_mode: GoMode,
+    pub num_workers: u32,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn analyze_database(
+    id: String,
+    file: PathBuf,
+    options: BatchAnalysisOptions,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<u32, Error> {
+    use diesel::prelude::*;
+    use crate::db::schema::games;
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    state
+        .analysis_cancel_flags
+        .insert(id.clone(), cancel_flag.clone());
+
+    let engine_path = PathBuf::from(&options.engine);
+
+    // Fetch all game IDs and moves that haven't been analyzed yet
+    let db = &mut crate::db::get_db_or_create(
+        &state,
+        file.to_str().unwrap(),
+        crate::db::ConnectionOptions::default(),
+    )?;
+
+    let all_games: Vec<(i32, Option<String>, Vec<u8>)> = games::table
+        .filter(games::analysis_depth.is_null())
+        .select((games::id, games::fen, games::moves))
+        .load(db)?;
+
+    let total_games = all_games.len();
+    if total_games == 0 {
+        update_progress(&state.progress_state, &app, id.clone(), 100.0, true)?;
+        state.analysis_cancel_flags.remove(&id);
+        return Ok(0);
+    }
+
+    // Decode all moves upfront
+    let game_data: Vec<(i32, String, Vec<String>)> = all_games
+        .into_iter()
+        .filter_map(|(game_id, fen_opt, moves_blob)| {
+            let fen: Fen = fen_opt
+                .as_deref()
+                .and_then(|f| Fen::from_ascii(f.as_bytes()).ok())
+                .unwrap_or_default();
+            let fen_str = fen.to_string();
+            let decoded = crate::db::encoding::decode_moves(moves_blob, fen).ok()?;
+            Some((game_id, fen_str, decoded))
+        })
+        .collect();
+
+    let total = game_data.len();
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let analyzed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Create a shared work queue
+    let queue = Arc::new(tokio::sync::Mutex::new(
+        game_data.into_iter().collect::<std::collections::VecDeque<_>>(),
+    ));
+
+    let num_workers = options.num_workers.min(16).max(1) as usize;
+
+    let mut handles = Vec::new();
+
+    for _worker_idx in 0..num_workers {
+        let queue = Arc::clone(&queue);
+        let cancel_flag = Arc::clone(&cancel_flag);
+        let completed = Arc::clone(&completed);
+        let analyzed_count = Arc::clone(&analyzed_count);
+        let engine_path = engine_path.clone();
+        let go_mode = options.go_mode.clone();
+        let app = app.clone();
+        let id = id.clone();
+        let progress_state = state.progress_state.clone();
+        let file = file.clone();
+        let pool_map = state.connection_pool.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let task = {
+                    let mut q = queue.lock().await;
+                    q.pop_front()
+                };
+
+                let (game_id, game_fen, uci_moves) = match task {
+                    Some(t) => t,
+                    None => break, // Queue empty, worker done
+                };
+
+                // Analyze this game
+                match analyze_single_game_moves(&engine_path, &go_mode, &game_fen, &uci_moves)
+                    .await
+                {
+                    Ok((scores, depth)) => {
+                        // Serialize scores as JSON
+                        let scores_json =
+                            serde_json::to_string(&scores).unwrap_or_else(|_| "[]".to_string());
+
+                        // Write results back to DB
+                        let db_path = file.to_str().unwrap().to_string();
+                        let pool = pool_map.get(&db_path);
+                        if let Some(pool) = pool {
+                            if let Ok(mut conn) = pool.get() {
+                                let _ = diesel::update(games::table.filter(games::id.eq(game_id)))
+                                    .set((
+                                        games::analysis_scores.eq(&scores_json),
+                                        games::analysis_depth.eq(depth as i32),
+                                    ))
+                                    .execute(&mut *conn);
+                            }
+                        }
+                        analyzed_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to analyze game {}: {:?}", game_id, e);
+                    }
+                }
+
+                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                let progress = (done as f32 / total as f32) * 100.0;
+                let _ = update_progress(&progress_state, &app, id.clone(), progress, false);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all workers to finish
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let final_count = analyzed_count.load(Ordering::SeqCst) as u32;
+
+    if cancel_flag.load(Ordering::SeqCst) {
+        state.analysis_cancel_flags.remove(&id);
+        return Err(Error::AnalysisCancelled);
+    }
+
+    update_progress(&state.progress_state, &app, id.clone(), 100.0, true)?;
+    state.analysis_cancel_flags.remove(&id);
+    Ok(final_count)
+}
+
 fn count_material(position: &Chess) -> i32 {
     if position.is_checkmate() {
         return -10000;

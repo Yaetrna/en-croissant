@@ -81,6 +81,10 @@ diesel::table! {
         moves -> Binary,
         #[sql_name = "PawnHome"]
         pawn_home -> Integer,
+        #[sql_name = "AnalysisScores"]
+        analysis_scores -> Nullable<Text>,
+        #[sql_name = "AnalysisDepth"]
+        analysis_depth -> Nullable<Integer>,
     }
 }
 

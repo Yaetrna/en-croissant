@@ -8,7 +8,7 @@ function calculateProgress(
   clock: number | null,
   tc: TimeControlField | null,
 ) {
-  if (!clock) {
+  if (clock === null || clock === undefined) {
     return 0;
   }
   if (tc) {
@@ -117,10 +117,10 @@ export function getClockInfo({
   if (position.length <= 1 && timeControl) {
     if (timeControl.length > 0) {
       const seconds = timeControl[0].seconds / 1000;
-      if (!whiteSeconds) {
+      if (whiteSeconds === undefined || whiteSeconds === null) {
         whiteSeconds = seconds;
       }
-      if (!blackSeconds) {
+      if (blackSeconds === undefined || blackSeconds === null) {
         blackSeconds = seconds;
       }
     }

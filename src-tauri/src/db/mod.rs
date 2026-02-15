@@ -1,7 +1,7 @@
-mod encoding;
+pub mod encoding;
 mod models;
 mod ops;
-mod schema;
+pub mod schema;
 mod search;
 mod search_index;
 
@@ -145,7 +145,7 @@ impl diesel::r2d2::CustomizeConnection<SqliteConnection, diesel::r2d2::Error>
     }
 }
 
-fn get_db_or_create(
+pub fn get_db_or_create(
     state: &State<AppState>,
     db_path: &str,
     options: ConnectionOptions,
@@ -160,6 +160,15 @@ fn get_db_or_create(
                 .max_size(16)
                 .connection_customizer(Box::new(options))
                 .build(ConnectionManager::<SqliteConnection>::new(db_path))?;
+            // Run migrations for existing databases (new columns for batch analysis)
+            if let Ok(mut conn) = pool.get() {
+                let _ = conn.batch_execute(
+                    "ALTER TABLE Games ADD COLUMN AnalysisScores TEXT;",
+                );
+                let _ = conn.batch_execute(
+                    "ALTER TABLE Games ADD COLUMN AnalysisDepth INTEGER;",
+                );
+            }
             state
                 .connection_pool
                 .insert(db_path.to_string(), pool.clone());

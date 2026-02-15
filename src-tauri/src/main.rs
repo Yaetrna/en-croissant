@@ -39,7 +39,7 @@ use tauri_plugin_log::{Target, TargetKind};
 
 use crate::chess::{
     analyze_game, cancel_analysis, get_engine_config, get_engine_logs, kill_engine, kill_engines,
-    stop_engine,
+    stop_engine, analyze_database,
 };
 use crate::db::{
     clear_games, convert_pgn, create_indexes, delete_database, delete_db_game, delete_empty_games,
@@ -120,6 +120,7 @@ fn main() {
             close_splashscreen,
             get_best_moves,
             analyze_game,
+            analyze_database,
             cancel_analysis,
             stop_engine,
             kill_engine,

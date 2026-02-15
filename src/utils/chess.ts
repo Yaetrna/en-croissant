@@ -83,7 +83,7 @@ export function getMoveText(
       for (const annotation of tree.annotations) {
         if (annotation === "") continue;
         moveText += isBasicAnnotation(annotation)
-          ? tree.annotations
+          ? annotation
           : ` $${ANNOTATION_INFO[annotation].nag}`;
       }
     }
@@ -113,14 +113,14 @@ export function getMoveText(
       if (squares.length > 0) {
         content += `[%csl ${squares
           .map((shape) => {
-            return shape.brush![0].toUpperCase() + shape.orig;
+            return (shape.brush ?? "G")[0].toUpperCase() + shape.orig;
           })
           .join(",")}]`;
       }
       if (arrows.length > 0) {
         content += `[%cal ${arrows
           .map((shape) => {
-            return shape.brush![0].toUpperCase() + shape.orig + shape.dest;
+            return (shape.brush ?? "G")[0].toUpperCase() + shape.orig + shape.dest;
           })
           .join(",")}]`;
       }
@@ -613,7 +613,13 @@ function getPgnHeaders(tokens: Token[]): GameHeaders {
     date: Date ?? "",
     site: Site ?? "",
     event: Event ?? "",
-    start: JSON.parse(Start ?? "[]"),
+    start: (() => {
+      try {
+        return JSON.parse(Start ?? "[]");
+      } catch {
+        return [];
+      }
+    })(),
     orientation: isValidOrientation(Orientation) ? Orientation : "white",
     time_control: TimeControl,
     variant: Variant,

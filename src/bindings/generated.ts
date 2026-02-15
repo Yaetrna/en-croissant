@@ -29,6 +29,14 @@ async analyzeGame(id: string, engine: string, goMode: GoMode, options: AnalysisO
     else return { status: "error", error: e  as any };
 }
 },
+async analyzeDatabase(id: string, file: string, options: BatchAnalysisOptions) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_database", { id, file, options }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async cancelAnalysis(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_analysis", { id }) };
@@ -472,6 +480,7 @@ progressEvent: "progress-event"
 /** user-defined types **/
 
 export type AnalysisOptions = { fen: string; moves: string[]; annotateNovelties: boolean; referenceDb: string | null; reversed: boolean }
+export type BatchAnalysisOptions = { engine: string; goMode: GoMode; numWorkers: number }
 export type BestMoves = { nodes: number; depth: number; score: Score; uciMoves: string[]; sanMoves: string[]; multipv: number; nps: number }
 export type BestMovesPayload = { bestLines: BestMoves[]; engine: string; tab: string; fen: string; moves: string[]; progress: number }
 export type ClockUpdateEvent = { gameId: string; whiteTime: bigint | null; blackTime: bigint | null }

@@ -96,10 +96,11 @@ export default function App() {
   const [, setActiveTab] = useAtom(activeTabAtom);
 
   useEffect(() => {
+    let detach: (() => void) | undefined;
     (async () => {
       await commands.closeSplashscreen();
       await initUserAgent();
-      const detach = await attachConsole();
+      detach = await attachConsole();
       info("React app started successfully");
 
       const store = getDefaultStore();
@@ -122,11 +123,10 @@ export default function App() {
           openFile(file, setTabs, setActiveTab);
         }
       }
-
-      return () => {
-        detach();
-      };
     })();
+    return () => {
+      detach?.();
+    };
   }, []);
 
   const fontSize = useAtomValue(fontSizeAtom);

@@ -28,7 +28,11 @@ export default function ErrorComponent({
             <b>{error.name}:</b> {error.message}
           </Text>
           <Code>{error.stack}</Code>
-          {error.cause}
+          {error.cause instanceof Error
+            ? error.cause.message
+            : error.cause != null
+              ? String(error.cause)
+              : null}
         </>
       ) : (
         <Text>
