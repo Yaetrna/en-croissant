@@ -22,7 +22,7 @@ import { chessgroundDests, chessgroundMove } from "chessops/compat";
 import { parseFen } from "chessops/fen";
 import equal from "fast-deep-equal";
 import { useAtom, useAtomValue } from "jotai";
-import { useCallback, useContext, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import PromotionModal from "../boards/PromotionModal";
 import { TreeStateContext } from "../common/TreeStateContext";
@@ -77,7 +77,16 @@ function PuzzleBoard({
       : "white"
     : "white";
   const [pendingMove, setPendingMove] = useState<NormalMove | null>(null);
+
+  // Track the current FEN to clear user-drawn shapes on position change
+  const prevFenRef = useRef(currentNode.fen);
   const [userShapes, setUserShapes] = useState<DrawShape[]>([]);
+  useEffect(() => {
+    if (prevFenRef.current !== currentNode.fen) {
+      prevFenRef.current = currentNode.fen;
+      setUserShapes([]);
+    }
+  }, [currentNode.fen]);
 
   const dests = chessgroundDests(pos!);
   const turn = pos?.turn || "white";
@@ -187,7 +196,9 @@ function PuzzleBoard({
           fen={currentNode.fen}
           check={moveHighlight && pos?.isCheck()}
           drawable={{
-            autoShapes: userShapes,
+            enabled: true,
+            visible: true,
+            shapes: userShapes,
             onChange: setUserShapes,
           }}
         />
